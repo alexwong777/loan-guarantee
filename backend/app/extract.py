@@ -7,7 +7,9 @@ the caller never has to say up front what type of document was uploaded.
 import asyncio
 import json
 import re
+from typing import Optional
 
+from .jobs import TrackProgress
 from .logging_config import logger
 from .ocr import Cancelled, IsCancelled, file_to_images, ocr_pages_async, ocr_single_page
 
@@ -69,19 +71,30 @@ def _extract_json(raw: str) -> dict:
     return {m.group(1): m.group(2) for m in _KV_FALLBACK_RE.finditer(_normalize_keys(snippet))}
 
 
-async def extract_kyc_async(filename: str, file_bytes: bytes, is_cancelled: IsCancelled = None) -> dict:
+async def extract_kyc_async(
+    filename: str,
+    file_bytes: bytes,
+    is_cancelled: IsCancelled = None,
+    fields_track: Optional[TrackProgress] = None,
+    text_track: Optional[TrackProgress] = None,
+) -> dict:
     pages = file_to_images(filename, file_bytes)
+    total = len(pages)
+    if fields_track is not None:
+        fields_track.total = total
 
     async def extract_fields() -> dict:
         fields: dict = {}
         for i, page in enumerate(pages, start=1):
             if is_cancelled is not None and await is_cancelled():
-                logger.info("Stopping KYC extraction for %s before page %d/%d (client disconnected).",
-                            filename, i, len(pages))
-                raise Cancelled(f"Stopped by client before page {i}/{len(pages)}.")
+                logger.info("Stopping KYC extraction for %s before page %d/%d (cancelled).", filename, i, total)
+                raise Cancelled(f"Stopped before page {i}/{total}.")
+
+            if fields_track is not None:
+                fields_track.current = i
 
             raw = await asyncio.to_thread(
-                ocr_single_page, page, EXTRACTION_PROMPT, page_label=f"{filename} KYC page {i}/{len(pages)}"
+                ocr_single_page, page, EXTRACTION_PROMPT, page_label=f"{filename} KYC page {i}/{total}"
             )
             parsed = _extract_json(raw)
             if not parsed:
@@ -90,11 +103,14 @@ async def extract_kyc_async(filename: str, file_bytes: bytes, is_cancelled: IsCa
                 if value in (None, "", "N/A", "n/a", "null"):
                     continue
                 fields.setdefault(key, value)
+
+        if fields_track is not None:
+            fields_track.done = True
         return fields
 
     fields, ocr_result = await asyncio.gather(
         extract_fields(),
-        ocr_pages_async(pages, filename, is_cancelled=is_cancelled),
+        ocr_pages_async(pages, filename, is_cancelled=is_cancelled, track=text_track),
     )
 
     logger.info("KYC extraction for %s found %d field(s): %s", filename, len(fields), sorted(fields.keys()))

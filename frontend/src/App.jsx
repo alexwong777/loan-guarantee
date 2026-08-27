@@ -14,7 +14,7 @@ export default function App() {
     <div className="app-shell">
       <header className="app-header">
         <div className="app-header__brand">
-          <div className="app-header__logo">LG</div>
+          <div className="app-header__logo">📄</div>
           <h1>AI OCR Demo</h1>
         </div>
         <nav className="tabs">

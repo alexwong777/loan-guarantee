@@ -1,11 +1,12 @@
 import asyncio
 import time
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from .compare import compare_documents
 from .extract import extract_kyc_async
+from .jobs import Job, TrackProgress, get_job, new_job, touch
 from .logging_config import logger
 from .ocr import Cancelled, OCRError, ocr_document_async
 
@@ -41,17 +42,64 @@ def _timing(elapsed: float, total_pages: int) -> dict:
     }
 
 
+def _serialize_tracks(job: Job) -> dict:
+    return {
+        name: {"label": t.label, "current": t.current, "total": t.total, "done": t.done}
+        for name, t in job.tracks.items()
+    }
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
 
 
-@app.post("/api/compare")
-async def compare(
-    request: Request,
-    client_file: UploadFile = File(...),
-    mizuho_file: UploadFile = File(...),
+async def _run_compare_job(
+    job: Job, client_filename: str, client_bytes: bytes, mizuho_filename: str, mizuho_bytes: bytes
 ):
+    client_track = TrackProgress(label="Client")
+    mizuho_track = TrackProgress(label="Mizuho")
+    job.tracks = {"client": client_track, "mizuho": mizuho_track}
+
+    async def is_cancelled() -> bool:
+        return job.cancel_requested
+
+    try:
+        client_result, mizuho_result = await asyncio.gather(
+            ocr_document_async(client_filename, client_bytes, is_cancelled=is_cancelled, track=client_track),
+            ocr_document_async(mizuho_filename, mizuho_bytes, is_cancelled=is_cancelled, track=mizuho_track),
+        )
+        elapsed = time.monotonic() - job.started_at
+        comparison = compare_documents(client_result["text"], mizuho_result["text"])
+        total_pages = client_result["page_count"] + mizuho_result["page_count"]
+        job.result = {
+            "client_text": client_result["text"],
+            "mizuho_text": mizuho_result["text"],
+            **comparison,
+            "timing": _timing(elapsed, total_pages),
+        }
+        job.status = "done"
+        logger.info(
+            "Compare job %s complete in %.1fs: match=%.1f%%, discrepancies=%d, pages=%d",
+            job.id, elapsed, comparison["match_percentage"], len(comparison["discrepancies"]), total_pages,
+        )
+    except Cancelled as exc:
+        job.status = "cancelled"
+        logger.info("Compare job %s stopped: %s", job.id, exc)
+    except OCRError as exc:
+        job.status = "error"
+        job.error = str(exc)
+        logger.error("Compare job %s failed: %s", job.id, exc)
+    except Exception as exc:  # noqa: BLE001 - keep the job's failure visible instead of hanging forever
+        job.status = "error"
+        job.error = str(exc)
+        logger.exception("Compare job %s crashed unexpectedly", job.id)
+    finally:
+        touch(job)
+
+
+@app.post("/api/compare/start")
+async def compare_start(client_file: UploadFile = File(...), mizuho_file: UploadFile = File(...)):
     client_bytes = await _read_upload(client_file)
     mizuho_bytes = await _read_upload(mizuho_file)
     logger.info(
@@ -59,56 +107,75 @@ async def compare(
         client_file.filename, len(client_bytes), mizuho_file.filename, len(mizuho_bytes),
     )
 
-    async def is_cancelled() -> bool:
-        return await request.is_disconnected()
-
-    started = time.monotonic()
-    try:
-        client_result, mizuho_result = await asyncio.gather(
-            ocr_document_async(client_file.filename, client_bytes, is_cancelled=is_cancelled),
-            ocr_document_async(mizuho_file.filename, mizuho_bytes, is_cancelled=is_cancelled),
-        )
-    except Cancelled as exc:
-        logger.info("Compare request stopped by client: %s", exc)
-        raise HTTPException(400, "Stopped by client.") from None
-    except OCRError as exc:
-        logger.error("Compare request failed: %s", exc)
-        raise HTTPException(502, str(exc)) from exc
-    elapsed = time.monotonic() - started
-
-    comparison = compare_documents(client_result["text"], mizuho_result["text"])
-    total_pages = client_result["page_count"] + mizuho_result["page_count"]
-    logger.info(
-        "Compare request complete in %.1fs: match=%.1f%%, discrepancies=%d, pages=%d",
-        elapsed, comparison["match_percentage"], len(comparison["discrepancies"]), total_pages,
+    job = new_job("compare")
+    asyncio.create_task(
+        _run_compare_job(job, client_file.filename, client_bytes, mizuho_file.filename, mizuho_bytes)
     )
-
-    return {
-        "client_text": client_result["text"],
-        "mizuho_text": mizuho_result["text"],
-        **comparison,
-        "timing": _timing(elapsed, total_pages),
-    }
+    return {"job_id": job.id}
 
 
-@app.post("/api/extract-kyc")
-async def extract(request: Request, file: UploadFile = File(...)):
+async def _run_kyc_job(job: Job, filename: str, file_bytes: bytes):
+    fields_track = TrackProgress(label="Fields")
+    text_track = TrackProgress(label="Full text")
+    job.tracks = {"fields": fields_track, "text": text_track}
+
+    async def is_cancelled() -> bool:
+        return job.cancel_requested
+
+    try:
+        result = await extract_kyc_async(
+            filename, file_bytes, is_cancelled=is_cancelled, fields_track=fields_track, text_track=text_track
+        )
+        elapsed = time.monotonic() - job.started_at
+        result["timing"] = _timing(elapsed, result["page_count"])
+        job.result = result
+        job.status = "done"
+    except Cancelled as exc:
+        job.status = "cancelled"
+        logger.info("KYC job %s stopped: %s", job.id, exc)
+    except OCRError as exc:
+        job.status = "error"
+        job.error = str(exc)
+        logger.error("KYC job %s failed: %s", job.id, exc)
+    except Exception as exc:  # noqa: BLE001 - keep the job's failure visible instead of hanging forever
+        job.status = "error"
+        job.error = str(exc)
+        logger.exception("KYC job %s crashed unexpectedly", job.id)
+    finally:
+        touch(job)
+
+
+@app.post("/api/extract-kyc/start")
+async def extract_start(file: UploadFile = File(...)):
     file_bytes = await _read_upload(file)
     logger.info("KYC extraction request: %s (%d bytes)", file.filename, len(file_bytes))
 
-    async def is_cancelled() -> bool:
-        return await request.is_disconnected()
+    job = new_job("kyc")
+    asyncio.create_task(_run_kyc_job(job, file.filename, file_bytes))
+    return {"job_id": job.id}
 
-    started = time.monotonic()
-    try:
-        result = await extract_kyc_async(file.filename, file_bytes, is_cancelled=is_cancelled)
-    except Cancelled as exc:
-        logger.info("KYC extraction request stopped by client: %s", exc)
-        raise HTTPException(400, "Stopped by client.") from None
-    except OCRError as exc:
-        logger.error("KYC extraction request failed: %s", exc)
-        raise HTTPException(502, str(exc)) from exc
-    elapsed = time.monotonic() - started
 
-    result["timing"] = _timing(elapsed, result["page_count"])
-    return result
+@app.get("/api/jobs/{job_id}")
+async def job_status(job_id: str):
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found (it may have expired).")
+
+    elapsed = time.monotonic() - job.started_at
+    return {
+        "status": job.status,
+        "elapsed_seconds": round(elapsed, 1),
+        "tracks": _serialize_tracks(job),
+        "result": job.result,
+        "error": job.error,
+    }
+
+
+@app.post("/api/jobs/{job_id}/stop")
+async def job_stop(job_id: str):
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found (it may have expired).")
+    job.cancel_requested = True
+    touch(job)
+    return {"status": "stopping"}

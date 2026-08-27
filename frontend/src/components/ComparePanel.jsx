@@ -23,6 +23,17 @@ function saveCache(entry) {
   }
 }
 
+function formatProgressLine(status) {
+  if (!status) return ''
+  const parts = Object.values(status.tracks || {}).map((t) => {
+    const label = t.label.toLowerCase()
+    if (!t.total) return `${label} starting…`
+    return t.done ? `${label} ${t.total}/${t.total} done` : `${label} page ${t.current}/${t.total}`
+  })
+  parts.push(`${status.elapsed_seconds}s elapsed`)
+  return parts.join('  ·  ')
+}
+
 export default function ComparePanel() {
   const [clientFile, setClientFile] = useState(null)
   const [mizuhoFile, setMizuhoFile] = useState(null)
@@ -32,6 +43,7 @@ export default function ComparePanel() {
   const [result, setResult] = useState(null)
   const [cachedNames, setCachedNames] = useState(null)
   const [stopController, setStopController] = useState(null)
+  const [progress, setProgress] = useState(null)
 
   useEffect(() => {
     const cached = loadCache()
@@ -50,8 +62,12 @@ export default function ComparePanel() {
     setError(null)
     setInfo(null)
     setResult(null)
+    setProgress(null)
     try {
-      const data = await compareLetters(clientFile, mizuhoFile, controller.signal)
+      const data = await compareLetters(clientFile, mizuhoFile, {
+        signal: controller.signal,
+        onProgress: setProgress,
+      })
       setResult(data)
       setCachedNames(null)
       saveCache({ result: data, clientName: clientFile.name, mizuhoName: mizuhoFile.name, savedAt: Date.now() })
@@ -61,6 +77,7 @@ export default function ComparePanel() {
     } finally {
       setLoading(false)
       setStopController(null)
+      setProgress(null)
     }
   }
 
@@ -98,6 +115,7 @@ export default function ComparePanel() {
             Stop
           </button>
         )}
+        {loading && progress && <p className="progress-line">{formatProgressLine(progress)}</p>}
         {error && <p className="error-text">{error}</p>}
         {info && <p className="info-text">{info}</p>}
       </div>

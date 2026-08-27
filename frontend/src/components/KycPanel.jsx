@@ -47,6 +47,17 @@ function saveCache(entry) {
   }
 }
 
+function formatProgressLine(status) {
+  if (!status) return ''
+  const parts = Object.values(status.tracks || {}).map((t) => {
+    const label = t.label.toLowerCase()
+    if (!t.total) return `${label} starting…`
+    return t.done ? `${label} ${t.total}/${t.total} done` : `${label} page ${t.current}/${t.total}`
+  })
+  parts.push(`${status.elapsed_seconds}s elapsed`)
+  return parts.join('  ·  ')
+}
+
 export default function KycPanel() {
   const [file, setFile] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -56,6 +67,7 @@ export default function KycPanel() {
   const [showRaw, setShowRaw] = useState(false)
   const [cachedName, setCachedName] = useState(null)
   const [stopController, setStopController] = useState(null)
+  const [progress, setProgress] = useState(null)
 
   useEffect(() => {
     const cached = loadCache()
@@ -72,8 +84,9 @@ export default function KycPanel() {
     setError(null)
     setInfo(null)
     setResult(null)
+    setProgress(null)
     try {
-      const data = await extractKyc(file, controller.signal)
+      const data = await extractKyc(file, { signal: controller.signal, onProgress: setProgress })
       setResult(data)
       setCachedName(null)
       saveCache({ result: data, fileName: file.name, savedAt: Date.now() })
@@ -83,6 +96,7 @@ export default function KycPanel() {
     } finally {
       setLoading(false)
       setStopController(null)
+      setProgress(null)
     }
   }
 
@@ -119,6 +133,7 @@ export default function KycPanel() {
             Stop
           </button>
         )}
+        {loading && progress && <p className="progress-line">{formatProgressLine(progress)}</p>}
         {error && <p className="error-text">{error}</p>}
         {info && <p className="info-text">{info}</p>}
       </div>

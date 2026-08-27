@@ -69,9 +69,16 @@ try raising them further for dense, multi-page documents.
 
 ## API
 
+Both flows are job-based so the frontend can poll for live per-page progress
+instead of blocking on one long request with no feedback:
+
 - `GET /api/health`
-- `POST /api/compare` — multipart form fields `client_file`, `mizuho_file`
-- `POST /api/extract-kyc` — multipart form field `file`
+- `POST /api/compare/start` — multipart form fields `client_file`, `mizuho_file` → `{job_id}`
+- `POST /api/extract-kyc/start` — multipart form field `file` → `{job_id}`
+- `GET /api/jobs/{job_id}` — `{status, elapsed_seconds, tracks, result, error}`,
+  where `status` is `running` / `done` / `error` / `cancelled`
+- `POST /api/jobs/{job_id}/stop` — requests cancellation; the job stops before
+  starting its next page
 
 Accepted file types: PDF, PNG, JPG/JPEG, WEBP, TIFF, BMP.
 

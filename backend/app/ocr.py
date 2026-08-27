@@ -10,11 +10,12 @@ for output tokens and generation stops after a line or two -- which is exactly t
 message instead of an OpenAI-style ``image_url`` content block.
 
 Page calls run through ``asyncio.to_thread`` so a slow OCR call doesn't block the
-whole event loop (and so the caller can check for a client disconnect between pages).
+whole event loop (and so the caller can check for cancellation between pages).
 """
 
 import asyncio
 import base64
+import re
 import time
 from io import BytesIO
 from pathlib import Path
@@ -25,6 +26,7 @@ from PIL import Image
 from pdf2image import convert_from_bytes
 
 from .config import settings
+from .jobs import TrackProgress
 from .logging_config import logger
 
 IsCancelled = Optional[Callable[[], Awaitable[bool]]]
@@ -35,14 +37,15 @@ class OCRError(Exception):
 
 
 class Cancelled(OCRError):
-    """Raised when the client disconnects/stops before all pages finish."""
+    """Raised when the client stops the job before all pages finish."""
 
 
 DEFAULT_OCR_PROMPT = (
     "Transcribe every word visible on this document page into clean Markdown. "
     "Preserve headings, tables, labels, values, numbers, and layout order exactly as "
     "written. Do not summarize, paraphrase, omit, or reword anything, and do not stop "
-    "until the entire page - including footers and small print - has been transcribed."
+    "until the entire page - including footers and small print - has been transcribed. "
+    "Write each line once; never repeat a line, sentence, or paragraph."
 )
 
 
@@ -50,6 +53,30 @@ def _encode_image(pil_image: Image.Image) -> str:
     buf = BytesIO()
     pil_image.convert("RGB").save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _dedupe_repeats(text: str) -> str:
+    """Vision-language OCR occasionally loops and repeats a line or paragraph
+    verbatim before it recovers. Collapse immediate consecutive repeats at both
+    the line and paragraph level as a safety net on top of the anti-repeat
+    generation options."""
+    lines = text.split("\n")
+    deduped_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and deduped_lines and deduped_lines[-1].strip() == stripped:
+            continue
+        deduped_lines.append(line)
+
+    blocks = re.split(r"\n\s*\n", "\n".join(deduped_lines))
+    deduped_blocks = []
+    for block in blocks:
+        stripped = block.strip()
+        if stripped and deduped_blocks and deduped_blocks[-1].strip() == stripped:
+            continue
+        deduped_blocks.append(block)
+
+    return "\n\n".join(deduped_blocks)
 
 
 def file_to_images(filename: str, file_bytes: bytes, dpi: int = None) -> list:
@@ -61,6 +88,16 @@ def file_to_images(filename: str, file_bytes: bytes, dpi: int = None) -> list:
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller as OCRError
             logger.exception("Failed to render PDF pages for %s", filename)
             raise OCRError(f"Could not render PDF pages: {exc}") from exc
+        # pdf2image's returned images are backed by files in a temp directory
+        # that can be cleaned up once this function returns. Force a full
+        # decode into memory now, while we're still single-threaded - callers
+        # may later read these same Image objects concurrently from multiple
+        # threads (e.g. KYC extraction runs a fields pass and a full-text pass
+        # in parallel), and a still-lazy Image being loaded from two threads
+        # at once against an already-vanished temp file raises
+        # "image file is truncated".
+        for page in pages:
+            page.load()
         logger.info("Rendered %s -> %d page(s) at %d DPI", filename, len(pages), dpi)
         return pages
 
@@ -91,6 +128,11 @@ def ocr_single_page(pil_image: Image.Image, prompt: str = None, page_label: str 
             "num_ctx": settings.OCR_NUM_CTX,
             "num_predict": settings.OCR_NUM_PREDICT,
             "temperature": 0.1,
+            # Discourages the model from getting stuck looping the same
+            # line/paragraph, which otherwise shows up as duplicated text
+            # in the OCR output.
+            "repeat_penalty": 1.3,
+            "repeat_last_n": 256,
         },
     }
 
@@ -127,8 +169,9 @@ def ocr_single_page(pil_image: Image.Image, prompt: str = None, page_label: str 
         logger.error("OCR request for %s returned an empty response after %.1fs", page_label, elapsed)
         raise OCRError("OCR backend returned an empty response for this page.")
 
+    content = _dedupe_repeats(content.strip())
     logger.info("OCR request for %s succeeded in %.1fs (%d chars)", page_label, elapsed, len(content))
-    return content.strip()
+    return content
 
 
 def _assemble_result(page_texts: list) -> dict:
@@ -143,22 +186,42 @@ def _assemble_result(page_texts: list) -> dict:
 
 
 async def ocr_pages_async(
-    pages: list, filename: str, prompt: str = None, is_cancelled: IsCancelled = None
+    pages: list,
+    filename: str,
+    prompt: str = None,
+    is_cancelled: IsCancelled = None,
+    track: Optional[TrackProgress] = None,
 ) -> dict:
+    total = len(pages)
+    if track is not None:
+        track.total = total
+
     page_texts = []
     for i, page in enumerate(pages, start=1):
         if is_cancelled is not None and await is_cancelled():
-            logger.info("Stopping %s before page %d/%d (client disconnected).", filename, i, len(pages))
-            raise Cancelled(f"Stopped by client before page {i}/{len(pages)}.")
+            logger.info("Stopping %s before page %d/%d (cancelled).", filename, i, total)
+            raise Cancelled(f"Stopped before page {i}/{total}.")
+
+        if track is not None:
+            track.current = i
+
         text = await asyncio.to_thread(
-            ocr_single_page, page, prompt, page_label=f"{filename} page {i}/{len(pages)}"
+            ocr_single_page, page, prompt, page_label=f"{filename} page {i}/{total}"
         )
         page_texts.append(text)
+
+    if track is not None:
+        track.done = True
+
     return _assemble_result(page_texts)
 
 
 async def ocr_document_async(
-    filename: str, file_bytes: bytes, prompt: str = None, is_cancelled: IsCancelled = None
+    filename: str,
+    file_bytes: bytes,
+    prompt: str = None,
+    is_cancelled: IsCancelled = None,
+    track: Optional[TrackProgress] = None,
 ) -> dict:
     pages = file_to_images(filename, file_bytes)
-    return await ocr_pages_async(pages, filename, prompt=prompt, is_cancelled=is_cancelled)
+    return await ocr_pages_async(pages, filename, prompt=prompt, is_cancelled=is_cancelled, track=track)

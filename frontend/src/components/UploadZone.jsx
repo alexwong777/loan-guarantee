@@ -1,8 +1,19 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 export default function UploadZone({ label, accentLabel, file, onFileSelected, disabled }) {
   const inputRef = useRef(null)
   const [isDragging, setIsDragging] = useState(false)
+  const [previewUrl, setPreviewUrl] = useState(null)
+
+  useEffect(() => {
+    if (file instanceof File) {
+      const url = URL.createObjectURL(file)
+      setPreviewUrl(url)
+      return () => URL.revokeObjectURL(url)
+    }
+    setPreviewUrl(null)
+    return undefined
+  }, [file])
 
   const handleFiles = useCallback(
     (files) => {
@@ -20,6 +31,11 @@ export default function UploadZone({ label, accentLabel, file, onFileSelected, d
     },
     [handleFiles, disabled],
   )
+
+  function handlePreview(e) {
+    e.stopPropagation()
+    if (previewUrl) window.open(previewUrl, '_blank', 'noopener,noreferrer')
+  }
 
   return (
     <div
@@ -43,6 +59,18 @@ export default function UploadZone({ label, accentLabel, file, onFileSelected, d
         onChange={(e) => handleFiles(e.target.files)}
       />
       <span className="upload-zone__badge">{accentLabel}</span>
+
+      {previewUrl && (
+        <button
+          type="button"
+          className="upload-zone__preview-btn"
+          onClick={handlePreview}
+          title="View original file"
+          aria-label="View original file"
+        >
+          🔍
+        </button>
+      )}
 
       {file ? (
         <div className="upload-zone__file">
