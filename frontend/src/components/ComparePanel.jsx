@@ -5,11 +5,14 @@ import MatchGauge from './MatchGauge.jsx'
 import UploadZone from './UploadZone.jsx'
 
 const CACHE_KEY = 'lg_compare_cache'
+const CACHE_VERSION = 2 // bump when the cached result shape changes, so old cached entries get ignored
 
 function loadCache() {
   try {
     const raw = localStorage.getItem(CACHE_KEY)
-    return raw ? JSON.parse(raw) : null
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed.version === CACHE_VERSION ? parsed : null
   } catch {
     return null
   }
@@ -81,7 +84,13 @@ export default function ComparePanel() {
       })
       setResult(data)
       setCachedNames(null)
-      saveCache({ result: data, clientName: clientFile.name, mizuhoName: mizuhoFile.name, savedAt: Date.now() })
+      saveCache({
+        version: CACHE_VERSION,
+        result: data,
+        clientName: clientFile.name,
+        mizuhoName: mizuhoFile.name,
+        savedAt: Date.now(),
+      })
     } catch (err) {
       if (err.isUserStop) setInfo('Stopped.')
       else setError(err.message)
@@ -177,6 +186,23 @@ export default function ComparePanel() {
             <DiffPane title="Mizuho Letter" segments={result.right_segments} tone="mizuho" />
           </div>
 
+          <div className="discrepancy-list">
+            <h3>Key Information</h3>
+            <p className="key-info-note">Extracted from the client letter.</p>
+            {result.guarantee_fields && Object.keys(result.guarantee_fields).length > 0 ? (
+              <div className="field-grid">
+                {GUARANTEE_FIELD_ORDER.filter((key) => result.guarantee_fields[key]).map((key) => (
+                  <div className="field-card" key={key}>
+                    <span className="field-card__label">{GUARANTEE_FIELD_LABELS[key]}</span>
+                    <span className="field-card__value">{result.guarantee_fields[key]}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="empty-note">No key fields could be extracted from the client letter.</p>
+            )}
+          </div>
+
           {result.discrepancies.length > 0 && (
             <div className="discrepancy-list">
               <h3>Discrepancy details</h3>
@@ -195,21 +221,6 @@ export default function ComparePanel() {
                   </div>
                 </div>
               ))}
-            </div>
-          )}
-
-          {result.guarantee_fields && Object.keys(result.guarantee_fields).length > 0 && (
-            <div className="discrepancy-list">
-              <h3>Key Information</h3>
-              <p className="key-info-note">Extracted from the client letter.</p>
-              <div className="field-grid">
-                {GUARANTEE_FIELD_ORDER.filter((key) => result.guarantee_fields[key]).map((key) => (
-                  <div className="field-card" key={key}>
-                    <span className="field-card__label">{GUARANTEE_FIELD_LABELS[key]}</span>
-                    <span className="field-card__value">{result.guarantee_fields[key]}</span>
-                  </div>
-                ))}
-              </div>
             </div>
           )}
         </div>

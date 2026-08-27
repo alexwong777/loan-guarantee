@@ -7,7 +7,7 @@ the caller never has to say up front what type of document was uploaded.
 import asyncio
 from typing import Optional
 
-from .json_repair import extract_json
+from .json_repair import extract_json, normalize_fields
 from .jobs import TrackProgress
 from .logging_config import logger
 from .ocr import Cancelled, IsCancelled, file_to_images, ocr_pages_async, ocr_single_page
@@ -16,11 +16,18 @@ EXTRACTION_PROMPT = (
     "You are a KYC compliance assistant. First identify what kind of document this image "
     "is (passport, national ID, company registration certificate, address proof such as a "
     "utility bill or bank statement, etc.), then extract whatever key identity, company, or "
-    "financial information is actually printed on it. Use these keys when the information is "
-    "present, and omit any key that does not apply: document_type, full_name, id_number, "
-    "passport_number, date_of_birth, nationality, gender, address, company_name, "
-    "registration_number, incorporation_date, issue_date, expiry_date, issuing_authority, "
-    "place_of_birth, phone_number, email, bank_name, account_number. "
+    "financial information is actually printed on it. Use exactly these snake_case keys, in "
+    "this exact spelling and casing - do not invent new keys or rename them - and omit any "
+    "key that does not apply: document_type, full_name, id_number, passport_number, "
+    "date_of_birth, nationality, gender, address, company_name, registration_number, "
+    "incorporation_date, issue_date, expiry_date, issuing_authority, place_of_birth, "
+    "phone_number, email, bank_name, account_number.\n"
+    "Only include a key if the document explicitly states that exact information for this "
+    "document/person/company. Never guess, infer, or copy a different piece of information "
+    "into an unrelated field (for example, do not put a company name into place_of_birth) - "
+    "if something is not stated, omit the key entirely.\n"
+    "Every value must be a single plain string, never an array or nested object - if a field "
+    "like address spans multiple lines, join them into one string separated by commas.\n"
     "Respond with ONLY a single valid JSON object - no markdown code fences, no comments, no "
     "trailing commas. Every key and every string value must be wrapped in double quotes. Keep "
     "the JSON compact."
@@ -52,12 +59,10 @@ async def extract_kyc_async(
             raw = await asyncio.to_thread(
                 ocr_single_page, page, EXTRACTION_PROMPT, page_label=f"{filename} KYC page {i}/{total}"
             )
-            parsed = extract_json(raw)
+            parsed = normalize_fields(extract_json(raw))
             if not parsed:
                 logger.warning("Could not parse any fields from %s page %d; raw response: %s", filename, i, raw[:500])
             for key, value in parsed.items():
-                if value in (None, "", "N/A", "n/a", "null"):
-                    continue
                 fields.setdefault(key, value)
 
         if fields_track is not None:

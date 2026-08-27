@@ -11,7 +11,7 @@ so it's a quick call on top of the OCR work that's already been done.
 import requests
 
 from .config import settings
-from .json_repair import extract_json
+from .json_repair import extract_json, normalize_fields
 from .logging_config import logger
 
 MAX_INPUT_CHARS = 12000
@@ -29,6 +29,7 @@ GUARANTEE_FIELDS_PROMPT = (
     "- expiry_date: the date the guarantee expires\n"
     "- power_of_attorney: the exact sentence or clause referencing the Power of Attorney "
     "(its date and the signatory), copied verbatim from the text - do not paraphrase it\n\n"
+    "Every value must be a single plain string, never an array or nested object.\n"
     "Respond with ONLY the JSON object - no markdown code fences, no comments, no trailing "
     "commas. Every key and value must be double-quoted.\n\nTEXT:\n"
 )
@@ -63,8 +64,8 @@ def extract_guarantee_fields(client_text: str) -> dict:
         return {}
 
     content = (response.json().get("message") or {}).get("content", "")
-    fields = extract_json(content)
+    fields = normalize_fields(extract_json(content))
     if not fields:
         logger.warning("Could not parse guarantee fields from response: %s", content[:500])
 
-    return {k: v for k, v in fields.items() if v not in (None, "", "N/A", "n/a", "null")}
+    return fields

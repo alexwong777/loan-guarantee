@@ -3,6 +3,7 @@ import { extractKyc } from '../api.js'
 import UploadZone from './UploadZone.jsx'
 
 const CACHE_KEY = 'lg_kyc_cache'
+const CACHE_VERSION = 2 // bump when the cached result shape changes, so old cached entries get ignored
 
 const FIELD_LABELS = {
   document_type: 'Document Type',
@@ -33,7 +34,9 @@ function formatLabel(key) {
 function loadCache() {
   try {
     const raw = localStorage.getItem(CACHE_KEY)
-    return raw ? JSON.parse(raw) : null
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed.version === CACHE_VERSION ? parsed : null
   } catch {
     return null
   }
@@ -89,7 +92,7 @@ export default function KycPanel() {
       const data = await extractKyc(file, { signal: controller.signal, onProgress: setProgress })
       setResult(data)
       setCachedName(null)
-      saveCache({ result: data, fileName: file.name, savedAt: Date.now() })
+      saveCache({ version: CACHE_VERSION, result: data, fileName: file.name, savedAt: Date.now() })
     } catch (err) {
       if (err.isUserStop) setInfo('Stopped.')
       else setError(err.message)
