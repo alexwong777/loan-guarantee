@@ -3,6 +3,7 @@
 import json
 import re
 
+from .logging_config import logger
 from .ocr import file_to_images, ocr_document, ocr_single_page
 
 EXTRACTION_PROMPT = (
@@ -39,15 +40,19 @@ def extract_kyc(filename: str, file_bytes: bytes) -> dict:
     pages = file_to_images(filename, file_bytes)
 
     fields: dict = {}
-    for page in pages:
-        raw = ocr_single_page(page, EXTRACTION_PROMPT)
+    for i, page in enumerate(pages, start=1):
+        raw = ocr_single_page(page, EXTRACTION_PROMPT, page_label=f"{filename} KYC page {i}/{len(pages)}")
         parsed = _extract_json(raw)
+        if not parsed:
+            logger.warning("Could not parse JSON fields from %s page %d; raw response: %s", filename, i, raw[:300])
         for key, value in parsed.items():
             if value in (None, "", "N/A", "n/a", "null"):
                 continue
             fields.setdefault(key, value)
 
     ocr_result = ocr_document(filename, file_bytes)
+
+    logger.info("KYC extraction for %s found %d field(s): %s", filename, len(fields), sorted(fields.keys()))
 
     return {
         "fields": fields,

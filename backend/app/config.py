@@ -11,7 +11,9 @@ class Settings:
     OCR_DPI: int = int(os.getenv("OCR_DPI", "220"))
     OCR_NUM_CTX: int = int(os.getenv("OCR_NUM_CTX", "8192"))
     OCR_NUM_PREDICT: int = int(os.getenv("OCR_NUM_PREDICT", "4096"))
-    OCR_TIMEOUT: int = int(os.getenv("OCR_TIMEOUT", "300"))
+    # CPU inference for a vision model can genuinely take minutes per page,
+    # especially on the first call while Ollama loads the model into memory.
+    OCR_TIMEOUT: int = int(os.getenv("OCR_TIMEOUT", "600"))
 
 
 settings = Settings()

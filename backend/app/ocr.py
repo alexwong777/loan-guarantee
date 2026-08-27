@@ -11,6 +11,7 @@ message instead of an OpenAI-style ``image_url`` content block.
 """
 
 import base64
+import time
 from io import BytesIO
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from PIL import Image
 from pdf2image import convert_from_bytes
 
 from .config import settings
+from .logging_config import logger
 
 
 class OCRError(Exception):
@@ -44,19 +46,23 @@ def file_to_images(filename: str, file_bytes: bytes, dpi: int = None) -> list:
     suffix = Path(filename).suffix.lower()
     if suffix == ".pdf":
         try:
-            return convert_from_bytes(file_bytes, dpi=dpi)
+            pages = convert_from_bytes(file_bytes, dpi=dpi)
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller as OCRError
+            logger.exception("Failed to render PDF pages for %s", filename)
             raise OCRError(f"Could not render PDF pages: {exc}") from exc
+        logger.info("Rendered %s -> %d page(s) at %d DPI", filename, len(pages), dpi)
+        return pages
 
     try:
         image = Image.open(BytesIO(file_bytes))
         image.load()
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to read image file %s", filename)
         raise OCRError(f"Could not read image file: {exc}") from exc
     return [image]
 
 
-def ocr_single_page(pil_image: Image.Image, prompt: str = None) -> str:
+def ocr_single_page(pil_image: Image.Image, prompt: str = None, page_label: str = "page") -> str:
     prompt = prompt or DEFAULT_OCR_PROMPT
     img_b64 = _encode_image(pil_image)
 
@@ -79,27 +85,47 @@ def ocr_single_page(pil_image: Image.Image, prompt: str = None) -> str:
 
     url = f"{settings.OLLAMA_URL.rstrip('/')}/api/chat"
 
+    logger.info(
+        "OCR request: %s -> %s (model=%s, num_ctx=%d, num_predict=%d, timeout=%ds)",
+        page_label, url, settings.OCR_MODEL, settings.OCR_NUM_CTX, settings.OCR_NUM_PREDICT,
+        settings.OCR_TIMEOUT,
+    )
+    started = time.monotonic()
+
     try:
         response = requests.post(url, json=payload, timeout=settings.OCR_TIMEOUT)
     except requests.RequestException as exc:
+        logger.error("OCR request for %s failed after %.1fs: %s", page_label, time.monotonic() - started, exc)
         raise OCRError(
             f"Could not reach GLM-OCR at {settings.OLLAMA_URL}. Is Ollama running "
             f"and reachable from the backend container? ({exc})"
         ) from exc
 
+    elapsed = time.monotonic() - started
+
     if response.status_code != 200:
+        logger.error(
+            "OCR request for %s returned %d after %.1fs: %s",
+            page_label, response.status_code, elapsed, response.text[:500],
+        )
         raise OCRError(f"OCR backend error ({response.status_code}): {response.text[:500]}")
 
     data = response.json()
     content = (data.get("message") or {}).get("content", "")
     if not content.strip():
+        logger.error("OCR request for %s returned an empty response after %.1fs", page_label, elapsed)
         raise OCRError("OCR backend returned an empty response for this page.")
+
+    logger.info("OCR request for %s succeeded in %.1fs (%d chars)", page_label, elapsed, len(content))
     return content.strip()
 
 
 def ocr_document(filename: str, file_bytes: bytes, prompt: str = None) -> dict:
     pages = file_to_images(filename, file_bytes)
-    page_texts = [ocr_single_page(page, prompt) for page in pages]
+    page_texts = [
+        ocr_single_page(page, prompt, page_label=f"{filename} page {i}/{len(pages)}")
+        for i, page in enumerate(pages, start=1)
+    ]
 
     if len(page_texts) > 1:
         full_text = "\n\n".join(

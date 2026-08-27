@@ -50,11 +50,7 @@ export default function KycPanel() {
   return (
     <div className="panel">
       <div className="panel__intro">
-        <h2>KYC Document Extraction</h2>
-        <p>
-          Upload a passport, ID card, or company registration document. GLM-OCR reads the
-          page and pulls out key identity and financial details into a structured summary.
-        </p>
+        <h2>KYC Extraction</h2>
       </div>
 
       <div className="upload-grid upload-grid--single">

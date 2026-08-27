@@ -15,10 +15,7 @@ export default function App() {
       <header className="app-header">
         <div className="app-header__brand">
           <div className="app-header__logo">LG</div>
-          <div>
-            <h1>Letter of Guarantee Studio</h1>
-            <p>Powered by GLM-OCR</p>
-          </div>
+          <h1>Letter of Guarantee Studio</h1>
         </div>
         <nav className="tabs">
           {TABS.map((tab) => (
@@ -34,10 +31,6 @@ export default function App() {
       </header>
 
       <main className="app-main">{activeTab === 'compare' ? <ComparePanel /> : <KycPanel />}</main>
-
-      <footer className="app-footer">
-        <p>Documents are processed through your own local GLM-OCR endpoint. Nothing leaves your machine.</p>
-      </footer>
     </div>
   )
 }

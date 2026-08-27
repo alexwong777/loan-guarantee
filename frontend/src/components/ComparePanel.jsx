@@ -30,12 +30,7 @@ export default function ComparePanel() {
   return (
     <div className="panel">
       <div className="panel__intro">
-        <h2>Letter of Guarantee Comparison</h2>
-        <p>
-          Upload the client-issued letter and the Mizuho-issued letter. Both are read with
-          GLM-OCR and checked word-for-word &mdash; the Mizuho letter should mirror the
-          client&rsquo;s wording exactly, so anything else is flagged below.
-        </p>
+        <h2>Guarantee Comparison</h2>
       </div>
 
       <div className="upload-grid">

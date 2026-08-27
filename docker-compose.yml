@@ -9,7 +9,10 @@ services:
       OCR_DPI: ${OCR_DPI:-220}
       OCR_NUM_CTX: ${OCR_NUM_CTX:-8192}
       OCR_NUM_PREDICT: ${OCR_NUM_PREDICT:-4096}
-      OCR_TIMEOUT: ${OCR_TIMEOUT:-300}
+      OCR_TIMEOUT: ${OCR_TIMEOUT:-600}
+    volumes:
+      # Backend logs land here on your machine so you can tail them while testing.
+      - ./backend/logs:/app/logs
     extra_hosts:
       # Lets the backend reach Ollama running on your Mac/PC host.
       # Docker Desktop (Mac/Windows) already resolves this; this line makes

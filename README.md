@@ -75,6 +75,37 @@ try raising them further for dense, multi-page documents.
 
 Accepted file types: PDF, PNG, JPG/JPEG, WEBP, TIFF, BMP.
 
+## Debugging / logs
+
+The backend writes every OCR request (target URL, timing, response size or
+error) to `backend/logs/backend.log` on your machine — that folder is
+volume-mounted into the container, so it updates live while the app runs:
+
+```bash
+tail -f backend/logs/backend.log
+```
+
+The same lines also show up with `docker compose logs -f backend`.
+
+If a Compare/Extract click just spins with no result, this is the first
+place to look — a page can legitimately take a couple of minutes on CPU
+inference, especially the first request after starting Ollama (it has to
+load the model into memory). The UI itself will show an error after 15
+minutes of no response rather than spinning forever.
+
+## Editing `.env`
+
+`.env` isn't committed (it's git-ignored) — it's created locally from
+`.env.example` and read by `docker-compose.yml`. To change a setting:
+
+```bash
+nano .env      # or any editor — change OLLAMA_URL, OCR_MODEL, etc.
+docker compose up -d --build
+```
+
+`docker compose up` picks up `.env` changes automatically and recreates any
+container whose config changed.
+
 ## Local frontend dev (optional)
 
 If you want hot-reload while tweaking the UI, without rebuilding the Docker
