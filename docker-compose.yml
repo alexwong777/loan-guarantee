@@ -1,0 +1,24 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OCR_MODEL: ${OCR_MODEL:-glm-ocr}
+      OCR_DPI: ${OCR_DPI:-220}
+      OCR_NUM_CTX: ${OCR_NUM_CTX:-8192}
+      OCR_NUM_PREDICT: ${OCR_NUM_PREDICT:-4096}
+      OCR_TIMEOUT: ${OCR_TIMEOUT:-300}
+    extra_hosts:
+      # Lets the backend reach Ollama running on your Mac/PC host.
+      # Docker Desktop (Mac/Windows) already resolves this; this line makes
+      # it work on Linux hosts too.
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
