@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .compare import compare_documents
 from .extract import extract_kyc_async
+from .guarantee_fields import extract_guarantee_fields
 from .jobs import Job, TrackProgress, get_job, new_job, touch
 from .logging_config import logger
 from .ocr import Cancelled, OCRError, ocr_document_async
@@ -69,14 +70,17 @@ async def _run_compare_job(
             ocr_document_async(client_filename, client_bytes, is_cancelled=is_cancelled, track=client_track),
             ocr_document_async(mizuho_filename, mizuho_bytes, is_cancelled=is_cancelled, track=mizuho_track),
         )
-        elapsed = time.monotonic() - job.started_at
         comparison = compare_documents(client_result["text"], mizuho_result["text"])
+        guarantee_fields = await asyncio.to_thread(extract_guarantee_fields, client_result["text"])
+
+        elapsed = time.monotonic() - job.started_at
         total_pages = client_result["page_count"] + mizuho_result["page_count"]
         job.result = {
             "client_text": client_result["text"],
             "mizuho_text": mizuho_result["text"],
             **comparison,
             "timing": _timing(elapsed, total_pages),
+            "guarantee_fields": guarantee_fields,
         }
         job.status = "done"
         logger.info(

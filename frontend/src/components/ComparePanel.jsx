@@ -23,6 +23,17 @@ function saveCache(entry) {
   }
 }
 
+const GUARANTEE_FIELD_LABELS = {
+  guarantee_number: 'Guarantee Number',
+  applicant: 'Applicant',
+  beneficiary: 'Beneficiary',
+  effective_date: 'Effective Date',
+  expiry_date: 'Expiry Date',
+  power_of_attorney: 'Power of Attorney',
+}
+
+const GUARANTEE_FIELD_ORDER = Object.keys(GUARANTEE_FIELD_LABELS)
+
 function formatProgressLine(status) {
   if (!status) return ''
   const parts = Object.values(status.tracks || {}).map((t) => {
@@ -184,6 +195,21 @@ export default function ComparePanel() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {result.guarantee_fields && Object.keys(result.guarantee_fields).length > 0 && (
+            <div className="discrepancy-list">
+              <h3>Key Information</h3>
+              <p className="key-info-note">Extracted from the client letter.</p>
+              <div className="field-grid">
+                {GUARANTEE_FIELD_ORDER.filter((key) => result.guarantee_fields[key]).map((key) => (
+                  <div className="field-card" key={key}>
+                    <span className="field-card__label">{GUARANTEE_FIELD_LABELS[key]}</span>
+                    <span className="field-card__value">{result.guarantee_fields[key]}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>

@@ -56,10 +56,14 @@ def _encode_image(pil_image: Image.Image) -> str:
 
 
 def _dedupe_repeats(text: str) -> str:
-    """Vision-language OCR occasionally loops and repeats a line or paragraph
-    verbatim before it recovers. Collapse immediate consecutive repeats at both
-    the line and paragraph level as a safety net on top of the anti-repeat
-    generation options."""
+    """Vision-language OCR occasionally loops: after finishing a page it starts
+    regenerating a paragraph it already produced earlier in the same response,
+    verbatim, sometimes getting cut off partway through the second time. This
+    is not always the immediately preceding paragraph - the whole back half of
+    a page can restart. Collapse immediate consecutive duplicate lines first
+    (catches small loops), then, once any paragraph exactly repeats one seen
+    earlier on the page, cut everything from there on rather than keep the
+    re-hashed content."""
     lines = text.split("\n")
     deduped_lines = []
     for line in lines:
@@ -69,14 +73,19 @@ def _dedupe_repeats(text: str) -> str:
         deduped_lines.append(line)
 
     blocks = re.split(r"\n\s*\n", "\n".join(deduped_lines))
-    deduped_blocks = []
+    seen = set()
+    kept_blocks = []
     for block in blocks:
-        stripped = block.strip()
-        if stripped and deduped_blocks and deduped_blocks[-1].strip() == stripped:
-            continue
-        deduped_blocks.append(block)
+        normalized = " ".join(block.split())
+        # Short blocks (page numbers, "Dear Sirs,", etc.) can legitimately
+        # repeat; only substantial paragraphs are treated as a restart.
+        if len(normalized) > 40 and normalized in seen:
+            break
+        if len(normalized) > 40:
+            seen.add(normalized)
+        kept_blocks.append(block)
 
-    return "\n\n".join(deduped_blocks)
+    return "\n\n".join(kept_blocks)
 
 
 def file_to_images(filename: str, file_bytes: bytes, dpi: int = None) -> list:
