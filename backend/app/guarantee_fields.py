@@ -1,25 +1,28 @@
 """Extracts the key identifying fields of a Letter of Guarantee - guarantee
 number, applicant, beneficiary, effective/expiry dates, and the Power of
-Attorney clause - from the client letter's already-OCR'd text. The client
-letter is treated as the source of truth for these fields, since the whole
-point of the comparison is checking whether Mizuho's letter matches it.
+Attorney clause - from the client letter. The client letter is treated as
+the source of truth for these fields, since the whole point of the
+comparison is checking whether Mizuho's letter matches it.
 
-This runs as a plain text prompt against the same GLM-OCR model (no image),
-so it's a quick call on top of the OCR work that's already been done.
+Runs as a vision prompt over the same rendered client page images used for
+full-text OCR, the same way KYC field extraction works - not a text-only
+prompt over the already-OCR'd text. GLM-OCR is an OCR-specialized vision
+model; asking it to follow instructions over plain text with no image
+attached is unreliable and was consistently returning nothing.
 """
 
-import requests
+import asyncio
+from typing import Optional
 
-from .config import settings
 from .json_repair import extract_json, normalize_fields
+from .jobs import TrackProgress
 from .logging_config import logger
-
-MAX_INPUT_CHARS = 12000
+from .ocr import Cancelled, IsCancelled, ocr_single_page
 
 GUARANTEE_FIELDS_PROMPT = (
-    "You are reviewing the OCR'd text of a bank Letter of Guarantee below. Extract the "
-    "following as a single strict JSON object, using exactly these keys, and omit a key "
-    "only if that information genuinely is not present in the text:\n"
+    "Look at this page of a bank Letter of Guarantee and extract the following as a "
+    "single strict JSON object, using exactly these keys, and omit a key only if that "
+    "information does not appear on this page:\n"
     "- guarantee_number: the guarantee/reference number, typically 3 uppercase letters "
     "followed by digits and dashes (e.g. GTO-768-500363-032)\n"
     "- applicant: the company or party being guaranteed for (usually introduced as "
@@ -28,44 +31,49 @@ GUARANTEE_FIELDS_PROMPT = (
     "- effective_date: the date the guarantee takes effect (often the letter date at the top)\n"
     "- expiry_date: the date the guarantee expires\n"
     "- power_of_attorney: the exact sentence or clause referencing the Power of Attorney "
-    "(its date and the signatory), copied verbatim from the text - do not paraphrase it\n\n"
-    "Every value must be a single plain string, never an array or nested object.\n"
+    "(its date and the signatory), copied verbatim from the page - do not paraphrase it\n\n"
+    "Only include a key if this exact page states that information - do not guess or infer "
+    "it from context. Every value must be a single plain string, never an array or nested "
+    "object.\n"
     "Respond with ONLY the JSON object - no markdown code fences, no comments, no trailing "
-    "commas. Every key and value must be double-quoted.\n\nTEXT:\n"
+    "commas. Every key and value must be double-quoted."
 )
 
 
-def extract_guarantee_fields(client_text: str) -> dict:
-    text = client_text.strip()
-    if not text:
-        return {}
+async def extract_guarantee_fields_async(
+    pages: list,
+    filename: str,
+    is_cancelled: IsCancelled = None,
+    track: Optional[TrackProgress] = None,
+) -> dict:
+    total = len(pages)
+    if track is not None:
+        track.total = total
 
-    payload = {
-        "model": settings.OCR_MODEL,
-        "stream": False,
-        "messages": [
-            {"role": "user", "content": GUARANTEE_FIELDS_PROMPT + text[:MAX_INPUT_CHARS]}
-        ],
-        "options": {
-            "num_ctx": settings.OCR_NUM_CTX,
-            "num_predict": 1024,
-            "temperature": 0.1,
-            "repeat_penalty": 1.3,
-            "repeat_last_n": 256,
-        },
-    }
-    url = f"{settings.OLLAMA_URL.rstrip('/')}/api/chat"
+    fields: dict = {}
+    for i, page in enumerate(pages, start=1):
+        if is_cancelled is not None and await is_cancelled():
+            logger.info("Stopping key-info extraction for %s before page %d/%d (cancelled).", filename, i, total)
+            raise Cancelled(f"Stopped before page {i}/{total}.")
 
-    try:
-        response = requests.post(url, json=payload, timeout=settings.OCR_TIMEOUT)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        logger.warning("Guarantee field extraction request failed: %s", exc)
-        return {}
+        if track is not None:
+            track.current = i
 
-    content = (response.json().get("message") or {}).get("content", "")
-    fields = normalize_fields(extract_json(content))
-    if not fields:
-        logger.warning("Could not parse guarantee fields from response: %s", content[:500])
+        raw = await asyncio.to_thread(
+            ocr_single_page, page, GUARANTEE_FIELDS_PROMPT, page_label=f"{filename} key-info page {i}/{total}"
+        )
+        parsed = normalize_fields(extract_json(raw))
+        if not parsed:
+            logger.warning(
+                "Could not parse guarantee fields from %s page %d; raw response: %s", filename, i, raw[:500]
+            )
+        for key, value in parsed.items():
+            fields.setdefault(key, value)
 
+    if track is not None:
+        track.done = True
+
+    logger.info(
+        "Guarantee field extraction for %s found %d field(s): %s", filename, len(fields), sorted(fields.keys())
+    )
     return fields

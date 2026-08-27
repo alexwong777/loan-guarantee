@@ -6,10 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .compare import compare_documents
 from .extract import extract_kyc_async
-from .guarantee_fields import extract_guarantee_fields
+from .guarantee_fields import extract_guarantee_fields_async
 from .jobs import Job, TrackProgress, get_job, new_job, touch
 from .logging_config import logger
-from .ocr import Cancelled, OCRError, ocr_document_async
+from .ocr import Cancelled, OCRError, file_to_images, ocr_pages_async
 
 app = FastAPI(title="Letter of Guarantee Studio API")
 
@@ -60,18 +60,38 @@ async def _run_compare_job(
 ):
     client_track = TrackProgress(label="Client")
     mizuho_track = TrackProgress(label="Mizuho")
-    job.tracks = {"client": client_track, "mizuho": mizuho_track}
+    fields_track = TrackProgress(label="Key info")
+    job.tracks = {"client": client_track, "mizuho": mizuho_track, "fields": fields_track}
 
     async def is_cancelled() -> bool:
         return job.cancel_requested
 
+    async def safe_guarantee_fields(pages: list) -> dict:
+        # Key Information is a bonus on top of the core comparison - a hiccup
+        # extracting it (a bad response, a transient request failure) should
+        # never fail the whole job. A user-initiated Stop should still
+        # cancel it like everything else, so Cancelled is left to propagate.
+        try:
+            return await extract_guarantee_fields_async(
+                pages, client_filename, is_cancelled=is_cancelled, track=fields_track
+            )
+        except Cancelled:
+            raise
+        except OCRError as exc:
+            logger.warning("Key info extraction failed for %s: %s", client_filename, exc)
+            fields_track.done = True
+            return {}
+
     try:
-        client_result, mizuho_result = await asyncio.gather(
-            ocr_document_async(client_filename, client_bytes, is_cancelled=is_cancelled, track=client_track),
-            ocr_document_async(mizuho_filename, mizuho_bytes, is_cancelled=is_cancelled, track=mizuho_track),
+        client_pages = file_to_images(client_filename, client_bytes)
+        mizuho_pages = file_to_images(mizuho_filename, mizuho_bytes)
+
+        client_result, mizuho_result, guarantee_fields = await asyncio.gather(
+            ocr_pages_async(client_pages, client_filename, is_cancelled=is_cancelled, track=client_track),
+            ocr_pages_async(mizuho_pages, mizuho_filename, is_cancelled=is_cancelled, track=mizuho_track),
+            safe_guarantee_fields(client_pages),
         )
         comparison = compare_documents(client_result["text"], mizuho_result["text"])
-        guarantee_fields = await asyncio.to_thread(extract_guarantee_fields, client_result["text"])
 
         elapsed = time.monotonic() - job.started_at
         total_pages = client_result["page_count"] + mizuho_result["page_count"]

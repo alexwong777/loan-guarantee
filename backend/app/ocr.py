@@ -223,14 +223,3 @@ async def ocr_pages_async(
         track.done = True
 
     return _assemble_result(page_texts)
-
-
-async def ocr_document_async(
-    filename: str,
-    file_bytes: bytes,
-    prompt: str = None,
-    is_cancelled: IsCancelled = None,
-    track: Optional[TrackProgress] = None,
-) -> dict:
-    pages = file_to_images(filename, file_bytes)
-    return await ocr_pages_async(pages, filename, prompt=prompt, is_cancelled=is_cancelled, track=track)
