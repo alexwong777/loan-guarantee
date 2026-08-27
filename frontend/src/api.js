@@ -15,9 +15,15 @@ async function handleResponse(res) {
   return res.json()
 }
 
-async function postForm(path, formData) {
+async function postForm(path, formData, externalSignal) {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+
+  const onExternalAbort = () => controller.abort()
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort()
+    else externalSignal.addEventListener('abort', onExternalAbort)
+  }
 
   let res
   try {
@@ -28,6 +34,11 @@ async function postForm(path, formData) {
     })
   } catch (err) {
     if (err.name === 'AbortError') {
+      if (externalSignal?.aborted) {
+        const stopError = new Error('Stopped.')
+        stopError.isUserStop = true
+        throw stopError
+      }
       throw new Error(
         `No response after ${REQUEST_TIMEOUT_MS / 60000} minutes. Check backend/logs/backend.log for what's happening.`,
       )
@@ -35,20 +46,21 @@ async function postForm(path, formData) {
     throw new Error(`Could not reach the backend (${err.message}). Is docker compose still running?`)
   } finally {
     clearTimeout(timeoutId)
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort)
   }
 
   return handleResponse(res)
 }
 
-export async function compareLetters(clientFile, mizuhoFile) {
+export async function compareLetters(clientFile, mizuhoFile, signal) {
   const formData = new FormData()
   formData.append('client_file', clientFile)
   formData.append('mizuho_file', mizuhoFile)
-  return postForm('/compare', formData)
+  return postForm('/compare', formData, signal)
 }
 
-export async function extractKyc(file) {
+export async function extractKyc(file, signal) {
   const formData = new FormData()
   formData.append('file', file)
-  return postForm('/extract-kyc', formData)
+  return postForm('/extract-kyc', formData, signal)
 }

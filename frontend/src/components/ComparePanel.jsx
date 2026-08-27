@@ -1,31 +1,81 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { compareLetters } from '../api.js'
 import DiffPane from './DiffPane.jsx'
 import MatchGauge from './MatchGauge.jsx'
 import UploadZone from './UploadZone.jsx'
+
+const CACHE_KEY = 'lg_compare_cache'
+
+function loadCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+function saveCache(entry) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(entry))
+  } catch {
+    // storage unavailable/full - caching is a convenience only, safe to skip
+  }
+}
 
 export default function ComparePanel() {
   const [clientFile, setClientFile] = useState(null)
   const [mizuhoFile, setMizuhoFile] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [info, setInfo] = useState(null)
   const [result, setResult] = useState(null)
+  const [cachedNames, setCachedNames] = useState(null)
+  const [stopController, setStopController] = useState(null)
+
+  useEffect(() => {
+    const cached = loadCache()
+    if (cached) {
+      setResult(cached.result)
+      setCachedNames({ client: cached.clientName, mizuho: cached.mizuhoName, savedAt: cached.savedAt })
+    }
+  }, [])
 
   const canCompare = clientFile && mizuhoFile && !loading
 
   async function handleCompare() {
+    const controller = new AbortController()
+    setStopController(controller)
     setLoading(true)
     setError(null)
+    setInfo(null)
     setResult(null)
     try {
-      const data = await compareLetters(clientFile, mizuhoFile)
+      const data = await compareLetters(clientFile, mizuhoFile, controller.signal)
       setResult(data)
+      setCachedNames(null)
+      saveCache({ result: data, clientName: clientFile.name, mizuhoName: mizuhoFile.name, savedAt: Date.now() })
     } catch (err) {
-      setError(err.message)
+      if (err.isUserStop) setInfo('Stopped.')
+      else setError(err.message)
     } finally {
       setLoading(false)
+      setStopController(null)
     }
   }
+
+  function handleStop() {
+    stopController?.abort()
+  }
+
+  function handleClearResult() {
+    localStorage.removeItem(CACHE_KEY)
+    setResult(null)
+    setCachedNames(null)
+  }
+
+  const displayClientName = clientFile?.name ?? cachedNames?.client
+  const displayMizuhoName = mizuhoFile?.name ?? cachedNames?.mizuho
 
   return (
     <div className="panel">
@@ -43,11 +93,27 @@ export default function ComparePanel() {
           {loading && <span className="spinner" />}
           {loading ? 'Comparing…' : 'Compare Letters'}
         </button>
+        {loading && (
+          <button type="button" className="btn btn--stop" onClick={handleStop}>
+            Stop
+          </button>
+        )}
         {error && <p className="error-text">{error}</p>}
+        {info && <p className="info-text">{info}</p>}
       </div>
 
       {result && (
         <div className="results fade-in">
+          {cachedNames && (
+            <p className="cache-note">
+              Showing the last cached result from {new Date(cachedNames.savedAt).toLocaleString()}. Upload new files
+              and compare to refresh it.{' '}
+              <button type="button" className="link-btn" onClick={handleClearResult}>
+                Clear
+              </button>
+            </p>
+          )}
+
           <div className="results__summary">
             <MatchGauge percentage={result.match_percentage} />
             <div className="results__summary-text">
@@ -57,9 +123,15 @@ export default function ComparePanel() {
                   : `${result.discrepancies.length} discrepanc${result.discrepancies.length === 1 ? 'y' : 'ies'} found`}
               </h3>
               <p>
-                Word-level comparison across <strong>{clientFile?.name}</strong> and{' '}
-                <strong>{mizuhoFile?.name}</strong>.
+                Word-level comparison across <strong>{displayClientName}</strong> and{' '}
+                <strong>{displayMizuhoName}</strong>.
               </p>
+              {result.timing && (
+                <p className="timing-note">
+                  {result.timing.total_pages} page{result.timing.total_pages === 1 ? '' : 's'} processed in{' '}
+                  {result.timing.elapsed_seconds}s (avg {result.timing.avg_seconds_per_page}s/page)
+                </p>
+              )}
               <div className="legend">
                 <span>
                   <i className="legend__swatch legend__swatch--removed" /> Only in client letter

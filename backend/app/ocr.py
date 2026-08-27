@@ -8,12 +8,17 @@ for output tokens and generation stops after a line or two -- which is exactly t
 "output.md only has each page's first line" symptom. The native endpoint applies
 ``options`` correctly, and also takes images as a top-level base64 list on the
 message instead of an OpenAI-style ``image_url`` content block.
+
+Page calls run through ``asyncio.to_thread`` so a slow OCR call doesn't block the
+whole event loop (and so the caller can check for a client disconnect between pages).
 """
 
+import asyncio
 import base64
 import time
 from io import BytesIO
 from pathlib import Path
+from typing import Awaitable, Callable, Optional
 
 import requests
 from PIL import Image
@@ -22,9 +27,15 @@ from pdf2image import convert_from_bytes
 from .config import settings
 from .logging_config import logger
 
+IsCancelled = Optional[Callable[[], Awaitable[bool]]]
+
 
 class OCRError(Exception):
     pass
+
+
+class Cancelled(OCRError):
+    """Raised when the client disconnects/stops before all pages finish."""
 
 
 DEFAULT_OCR_PROMPT = (
@@ -120,13 +131,7 @@ def ocr_single_page(pil_image: Image.Image, prompt: str = None, page_label: str 
     return content.strip()
 
 
-def ocr_document(filename: str, file_bytes: bytes, prompt: str = None) -> dict:
-    pages = file_to_images(filename, file_bytes)
-    page_texts = [
-        ocr_single_page(page, prompt, page_label=f"{filename} page {i}/{len(pages)}")
-        for i, page in enumerate(pages, start=1)
-    ]
-
+def _assemble_result(page_texts: list) -> dict:
     if len(page_texts) > 1:
         full_text = "\n\n".join(
             f"<!-- Page {i} -->\n\n{text}" for i, text in enumerate(page_texts, start=1)
@@ -134,4 +139,26 @@ def ocr_document(filename: str, file_bytes: bytes, prompt: str = None) -> dict:
     else:
         full_text = page_texts[0] if page_texts else ""
 
-    return {"pages": page_texts, "text": full_text.strip(), "page_count": len(pages)}
+    return {"pages": page_texts, "text": full_text.strip(), "page_count": len(page_texts)}
+
+
+async def ocr_pages_async(
+    pages: list, filename: str, prompt: str = None, is_cancelled: IsCancelled = None
+) -> dict:
+    page_texts = []
+    for i, page in enumerate(pages, start=1):
+        if is_cancelled is not None and await is_cancelled():
+            logger.info("Stopping %s before page %d/%d (client disconnected).", filename, i, len(pages))
+            raise Cancelled(f"Stopped by client before page {i}/{len(pages)}.")
+        text = await asyncio.to_thread(
+            ocr_single_page, page, prompt, page_label=f"{filename} page {i}/{len(pages)}"
+        )
+        page_texts.append(text)
+    return _assemble_result(page_texts)
+
+
+async def ocr_document_async(
+    filename: str, file_bytes: bytes, prompt: str = None, is_cancelled: IsCancelled = None
+) -> dict:
+    pages = file_to_images(filename, file_bytes)
+    return await ocr_pages_async(pages, filename, prompt=prompt, is_cancelled=is_cancelled)

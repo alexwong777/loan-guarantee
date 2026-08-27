@@ -15,7 +15,7 @@ export default function App() {
       <header className="app-header">
         <div className="app-header__brand">
           <div className="app-header__logo">LG</div>
-          <h1>Letter of Guarantee Studio</h1>
+          <h1>AI OCR Demo</h1>
         </div>
         <nav className="tabs">
           {TABS.map((tab) => (

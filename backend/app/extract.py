@@ -1,56 +1,101 @@
-"""KYC document field extraction (passports, ID cards, company registration docs)."""
+"""KYC document field extraction (passports, ID cards, company registration docs,
+address-proof documents, etc). The model is asked to identify what kind of document
+it's looking at and pull out whatever relevant fields are actually printed on it -
+the caller never has to say up front what type of document was uploaded.
+"""
 
+import asyncio
 import json
 import re
 
 from .logging_config import logger
-from .ocr import file_to_images, ocr_document, ocr_single_page
+from .ocr import Cancelled, IsCancelled, file_to_images, ocr_pages_async, ocr_single_page
 
 EXTRACTION_PROMPT = (
-    "You are a KYC compliance assistant. Look at this identity or company document "
-    "image and extract the key information as a single strict JSON object. Use these "
-    "keys when the information is present in the document, and omit any key that does "
-    "not apply: document_type, full_name, id_number, passport_number, date_of_birth, "
-    "nationality, gender, address, company_name, registration_number, "
-    "incorporation_date, issue_date, expiry_date, issuing_authority, place_of_birth. "
-    "Respond with ONLY the JSON object - no explanation, no markdown code fences."
+    "You are a KYC compliance assistant. First identify what kind of document this image "
+    "is (passport, national ID, company registration certificate, address proof such as a "
+    "utility bill or bank statement, etc.), then extract whatever key identity, company, or "
+    "financial information is actually printed on it. Use these keys when the information is "
+    "present, and omit any key that does not apply: document_type, full_name, id_number, "
+    "passport_number, date_of_birth, nationality, gender, address, company_name, "
+    "registration_number, incorporation_date, issue_date, expiry_date, issuing_authority, "
+    "place_of_birth, phone_number, email, bank_name, account_number. "
+    "Respond with ONLY a single valid JSON object - no markdown code fences, no comments, no "
+    "trailing commas. Every key and every string value must be wrapped in double quotes. Keep "
+    "the JSON compact."
 )
+
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+_UNQUOTED_KEY_RE = re.compile(r'([{,]\s*)"?([A-Za-z_][A-Za-z0-9_]*)"?\s*:')
+_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+_KV_FALLBACK_RE = re.compile(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _strip_fence(raw: str) -> str:
+    match = _FENCE_RE.search(raw)
+    return match.group(1) if match else raw
+
+
+def _normalize_keys(snippet: str) -> str:
+    """Quotes bare keys (`name:`) and fixes keys missing their opening quote
+    (`name":`), which is the malformed shape GLM-OCR sometimes produces."""
+    return _UNQUOTED_KEY_RE.sub(r'\1"\2":', snippet)
+
+
+def _balance(snippet: str) -> str:
+    """Best-effort repair for output that got cut off mid-string/object."""
+    if snippet.count('"') % 2 == 1:
+        snippet += '"'
+    snippet += "}" * max(0, snippet.count("{") - snippet.count("}"))
+    snippet += "]" * max(0, snippet.count("[") - snippet.count("]"))
+    return snippet
 
 
 def _extract_json(raw: str) -> dict:
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return {}
+    text = _strip_fence(raw)
+    start, end = text.find("{"), text.rfind("}")
+    snippet = text[start : end + 1] if start != -1 and end != -1 and end > start else text
 
-    snippet = raw[start : end + 1]
-    try:
-        return json.loads(snippet)
-    except json.JSONDecodeError:
-        pass
+    for candidate in (snippet, _normalize_keys(snippet)):
+        cleaned = _TRAILING_COMMA_RE.sub(r"\1", candidate)
+        for attempt in (cleaned, _balance(cleaned)):
+            try:
+                return json.loads(attempt)
+            except json.JSONDecodeError:
+                continue
 
-    cleaned = re.sub(r",\s*([}\]])", r"\1", snippet)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        return {}
+    # Last resort: pull out whichever "key": "value" pairs are well-formed on
+    # their own, even if the JSON around them is broken or truncated.
+    return {m.group(1): m.group(2) for m in _KV_FALLBACK_RE.finditer(_normalize_keys(snippet))}
 
 
-def extract_kyc(filename: str, file_bytes: bytes) -> dict:
+async def extract_kyc_async(filename: str, file_bytes: bytes, is_cancelled: IsCancelled = None) -> dict:
     pages = file_to_images(filename, file_bytes)
 
-    fields: dict = {}
-    for i, page in enumerate(pages, start=1):
-        raw = ocr_single_page(page, EXTRACTION_PROMPT, page_label=f"{filename} KYC page {i}/{len(pages)}")
-        parsed = _extract_json(raw)
-        if not parsed:
-            logger.warning("Could not parse JSON fields from %s page %d; raw response: %s", filename, i, raw[:300])
-        for key, value in parsed.items():
-            if value in (None, "", "N/A", "n/a", "null"):
-                continue
-            fields.setdefault(key, value)
+    async def extract_fields() -> dict:
+        fields: dict = {}
+        for i, page in enumerate(pages, start=1):
+            if is_cancelled is not None and await is_cancelled():
+                logger.info("Stopping KYC extraction for %s before page %d/%d (client disconnected).",
+                            filename, i, len(pages))
+                raise Cancelled(f"Stopped by client before page {i}/{len(pages)}.")
 
-    ocr_result = ocr_document(filename, file_bytes)
+            raw = await asyncio.to_thread(
+                ocr_single_page, page, EXTRACTION_PROMPT, page_label=f"{filename} KYC page {i}/{len(pages)}"
+            )
+            parsed = _extract_json(raw)
+            if not parsed:
+                logger.warning("Could not parse any fields from %s page %d; raw response: %s", filename, i, raw[:500])
+            for key, value in parsed.items():
+                if value in (None, "", "N/A", "n/a", "null"):
+                    continue
+                fields.setdefault(key, value)
+        return fields
+
+    fields, ocr_result = await asyncio.gather(
+        extract_fields(),
+        ocr_pages_async(pages, filename, is_cancelled=is_cancelled),
+    )
 
     logger.info("KYC extraction for %s found %d field(s): %s", filename, len(fields), sorted(fields.keys()))
 
